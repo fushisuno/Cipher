@@ -165,6 +165,117 @@ def decriptFile(nameFile, key):
     except Exception as e:
         print(f"\n❌ Ocorreu um erro inesperado durante a descriptografia de '{nameFile}': {e}")
 
+def generate_metadata_file(original_filename: str, key: bytes):
+    """
+    Gera um arquivo de metadados (.meta) para verificação de integridade.
+    O arquivo .meta contém um cabeçalho (com IV) e um bloco de hash (últimos 16 bytes do ciphertext).
+    """
+    original_filepath = f'./arquivos/{original_filename}'
+    meta_filename = f'{original_filename}.meta'
+    meta_filepath = f'./meta/{meta_filename}'
+
+    try:
+        os.makedirs('./meta', exist_ok=True)
+
+        with open(original_filepath, 'rb') as f:
+            original_content = f.read()
+
+        if not original_content:
+            print(f"⚠️ Aviso: O arquivo original '{original_filepath}' está vazio. A tag de integridade será baseada em conteúdo vazio.")
+
+        iv_meta = os.urandom(16)
+        
+        ciphertext_for_tag = encrypt_aes(key, iv_meta, original_content)
+        
+        if len(ciphertext_for_tag) < 16:
+            raise ValueError("Erro ao gerar tag: ciphertext resultante é menor que 16 bytes.")
+            
+        tag_bloco = ciphertext_for_tag[-16:] # Pega os últimos 16 bytes
+
+        header_meta = defHeader(iv_meta)
+
+        metadata_content = header_meta + tag_bloco
+
+        if len(metadata_content) != 48:
+            raise ValueError(f"Erro ao montar metadados: tamanho incorreto. Esperado 48, obtido {len(metadata_content)}")
+
+        with open(meta_filepath, 'wb') as f_meta:
+            f_meta.write(metadata_content)
+
+        print(f"\n✅ Arquivo de metadados '{meta_filename}' gerado com sucesso em '{meta_filepath}'.")
+        print(f"   IV usado para tag: {iv_meta.hex()}")
+        print(f"   Tag (últimos 16 bytes do cipher): {tag_bloco.hex()}")
+
+    except FileNotFoundError:
+        print(f"\n❌ Erro: O arquivo original '{original_filepath}' não foi encontrado para gerar metadados.")
+    except ValueError as e:
+        print(f"\n❌ Erro durante a geração do arquivo de metadados: {e}")
+    except Exception as e:
+        print(f"\n❌ Ocorreu um erro inesperado durante a geração de metadados para '{original_filename}': {e}")
+
+def verify_integrity(original_filename: str, key: bytes):
+    """
+    Verifica a integridade de um arquivo original comparando sua tag calculada
+    com a tag armazenada em seu arquivo .meta correspondente.
+    """
+    original_filepath = f'./arquivos/{original_filename}'
+    meta_filename = f'{original_filename}.meta'
+    meta_filepath = f'./meta/{meta_filename}'
+
+    try:
+        with open(meta_filepath, 'rb') as f_meta:
+            meta_content = f_meta.read()
+
+        if len(meta_content) != 48:
+            raise ValueError(f"Arquivo de metadados '{meta_filename}' tem tamanho incorreto. Esperado 48 bytes, obtido {len(meta_content)}.")
+
+        header_bytes_meta = meta_content[:32]
+        stored_tag_bloco = meta_content[32:]
+
+        ident_meta       = header_bytes_meta[0:2]
+        version_meta     = header_bytes_meta[2]
+        algo_meta        = header_bytes_meta[3]
+        mode_meta        = header_bytes_meta[4]
+        stored_iv_meta   = header_bytes_meta[5:21]
+
+        if ident_meta.decode('utf-8', errors='ignore') != 'ED':
+            raise ValueError("Identificador inválido no cabeçalho do arquivo .meta.")
+        if version_meta != 0x01:
+            raise ValueError("Versão inválida no cabeçalho do arquivo .meta.")
+        if algo_meta != 0x01: 
+            raise ValueError("Algo inválido no cabeçalho do arquivo .meta.")
+        if mode_meta != 0x01:
+            raise ValueError("Modo infálido no cabeçalho do arquivo .meta.")
+        if len(stored_iv_meta) != 16:
+            raise ValueError("Tamanho do IV incorreto no cabeçalho do arquivo .meta.")
+
+        with open(original_filepath, 'rb') as f_orig:
+            original_content = f_orig.read()
+        
+        # Criptografa o conteúdo original com o IV do arquivo .meta para recalcular a tag
+        recalculated_ciphertext = encrypt_aes(key, stored_iv_meta, original_content)
+        
+        if len(recalculated_ciphertext) < 16:
+            raise ValueError("Erro ao recalcular tag: ciphertext resultante é menor que 16 bytes.")
+            
+        calculated_tag_bloco = recalculated_ciphertext[-16:]
+
+        print(f"\n--- Verificação de Integridade para '{original_filename}' ---")
+        print(f"   IV lido do .meta: {stored_iv_meta.hex()}")
+        print(f"   Tag armazenada no .meta: {stored_tag_bloco.hex()}")
+        print(f"   Tag calculada do arquivo: {calculated_tag_bloco.hex()}")
+
+        if stored_tag_bloco == calculated_tag_bloco:
+            print(f"✅ INTEGRIDADE VERIFICADA: O arquivo '{original_filename}' não foi alterado.")
+        else:
+            print(f"❌ FALHA NA INTEGRIDADE: O arquivo '{original_filename}' foi alterado ou o arquivo .meta não corresponde.")
+
+    except FileNotFoundError:
+        print(f"\n❌ Erro: Arquivo original '{original_filepath}' ou arquivo de metadados '{meta_filepath}' não encontrado.")
+    except ValueError as e:
+        print(f"\n❌ Erro durante a verificação de integridade: {e}")
+    except Exception as e:
+        print(f"\n❌ Ocorreu um erro inesperado durante a verificação de integridade para '{original_filename}': {e}")
      
 os.makedirs('./arquivos', exist_ok=True)
 os.makedirs('./arquivos_encript', exist_ok=True)
@@ -176,17 +287,21 @@ key = b'\xe1\x18\x89\xae\x98\xf7\x94\xf4+\x9bL\x89\xe0\x08W\xf8'
 nameFile_input = input("Informe o nome do arquivo.\nPara criptografar: 'nome_original.txt' (deve estar em './arquivos/')\nPara descriptografar: 'nome_cifrado.enc' (deve estar em './arquivos_encript/')\nNome do arquivo: ")
 
 op = -1
-while op not in [0, 1, 2]:
+while op not in [0, 1, 2, 3]:
     try:
-        op = int(input("Qual operação ? 0 (Criptografar)\t1 (Descriptografar)\t2 (Meta)\nEscolha: "))
-        if op not in [0, 1, 2]:
-            print("❌ Opção inválida. Por favor, digite 0 para Criptografar ou 1 para Descriptografar.")
+        op = int(input("Qual operação ? 0 (Criptografar)\t1 (Descriptografar)\t2 (Gerar Arquivo de Metadados)\t 3 (Verificar Integridade)\nEscolha: "))
+        if op not in [0, 1, 2, 3]:
+            print("❌ Opção inválida. Por favor, digite 0 para Criptografar, 1 para Descriptografar, 2 para Gerar Arquivo de Metadados ou 3 para Verificar Integridade.")
     except ValueError:
-        print("❌ Entrada inválida. Por favor, digite um número (0 ou 1).")
+        print("❌ Entrada inválida. Por favor, digite um número (0, 1, 2 ou 3).")
 
 print("\n--- Iniciando Operação ---")
 if op == 0:
     encriptFile(nameFile_input, key)
 elif op == 1:
     decriptFile(nameFile_input, key)
+elif op == 2:
+    generate_metadata_file(nameFile_input, key)
+elif op == 3:
+    verify_integrity(nameFile_input, key)
 print("--- Operação Concluída ---\n")
